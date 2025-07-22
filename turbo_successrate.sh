@@ -20,6 +20,8 @@ echo -e "\e[93mCalculating, please wait...\e[0m"
 START_TIME=$(date +%s) # Get start time in seconds
 
 # Use a single AWK call to process everything
+# AWK will now also capture the first and last timestamps
+# The output is redirected to a temporary file, which we will then process.
 $LOG_COMMAND 2>&1 | awk '
 BEGIN {
     # Initialize variables
@@ -29,10 +31,27 @@ BEGIN {
     get_repair_success = 0; get_repair_failed = 0; get_repair_canceled = 0;
     put_repair_success = 0; put_repair_canceled = 0; put_repair_failed = 0;
     delete_success = 0; delete_failed = 0;
+
+    first_timestamp = "";
+    last_timestamp = "";
 }
 
 # Main line processing logic
 {
+    # Capture the first timestamp from the very first line processed
+    if (first_timestamp == "") {
+        # Check if the line starts with a timestamp pattern (YYYY-MM-DDTHH:MM:SS)
+        # This prevents capturing empty lines or non-log lines as timestamps
+        if ($1 ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z?$/) {
+            first_timestamp = substr($1, 1, length($1) - 1); # Remove 'Z' if present
+        }
+    }
+    # Always update the last timestamp, so it will hold the timestamp of the last line
+    if ($1 ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z?$/) {
+        last_timestamp = substr($1, 1, length($1) - 1); # Remove 'Z' if present
+    }
+
+
     if ($0 ~ /GET_AUDIT/) {
         if ($0 ~ /downloaded/) { audit_success++; }
         else if ($0 ~ /failed/) {
@@ -129,9 +148,43 @@ END {
     printf "%-*s%.3f%%\n", LABEL_WIDTH, "Fail Rate:", (total_deletes >= 1 ? (delete_failed / total_deletes) * 100 : 0.000);
     printf "\033[92m%-*s%d \033[0m\n", LABEL_WIDTH, "Successful:", delete_success;
     printf "%-*s%.3f%%\n", LABEL_WIDTH, "Success Rate:", (total_deletes >= 1 ? (delete_success / total_deletes) * 100 : 0.000);
-}'
+
+    # Print captured timestamps at the very end of AWK processing, after all stats
+    print "FIRST_TIMESTAMP_AWK:" first_timestamp;
+    print "LAST_TIMESTAMP_AWK:" last_timestamp;
+}' > awk_output.tmp # Redirect AWK output to a temporary file
+
+# Read the collected AWK output
+AWK_RESULTS=$(cat awk_output.tmp)
+rm awk_output.tmp # Clean up the temporary file
+
+# Separate the statistics from the timestamp lines
+# The statistics are everything *before* the FIRST_TIMESTAMP_AWK line
+STATISTICS_OUTPUT=$(echo "$AWK_RESULTS" | sed -n '/FIRST_TIMESTAMP_AWK:/q;p')
+# The timestamps are extracted using grep as before
+FIRST_LINE_TIMESTAMP_STR=$(echo "$AWK_RESULTS" | grep "FIRST_TIMESTAMP_AWK:" | cut -d':' -f2- | sed 's/T/ /')
+LAST_LINE_TIMESTAMP_STR=$(echo "$AWK_RESULTS" | grep "LAST_TIMESTAMP_AWK:" | cut -d':' -f2- | sed 's/T/ /')
+
+# Print the statistics to the console
+echo "$STATISTICS_OUTPUT"
 
 END_TIME=$(date +%s) # Get end time in seconds
-ELAPSED_TIME=$((END_TIME - START_TIME)) # Calculate elapsed time
+ELAPSED_SCRIPT_TIME=$((END_TIME - START_TIME)) # Calculate elapsed script time
 
-echo -e "\n\e[93mScript execution time: ${ELAPSED_TIME} seconds.\e[0m"
+# Convert timestamps to Unix epoch
+FIRST_TIMESTAMP=$(date -d "$FIRST_LINE_TIMESTAMP_STR" +%s 2>/dev/null)
+LAST_TIMESTAMP=$(date -d "$LAST_LINE_TIMESTAMP_STR" +%s 2>/dev/null)
+
+if [ -z "$FIRST_TIMESTAMP" ] || [ -z "$LAST_TIMESTAMP" ]; then
+    echo -e "\e[91mCould not parse timestamps from log data. Ensure logs contain 'YYYY-MM-DDTHH:MM:SSZ' format.\e[0m"
+else
+    LOG_DURATION_SECONDS=$((LAST_TIMESTAMP - FIRST_TIMESTAMP))
+
+    DAYS=$((LOG_DURATION_SECONDS / 86400))
+    HOURS=$(( (LOG_DURATION_SECONDS % 86400) / 3600 ))
+    MINUTES=$(( ( (LOG_DURATION_SECONDS % 86400) % 3600 ) / 60 ))
+
+    echo -e "\n\e[93mLog data covers a period of: ${DAYS} days, ${HOURS} hours, ${MINUTES} minutes.\e[0m"
+fi
+
+echo -e "\n\e[93mScript execution time: ${ELAPSED_SCRIPT_TIME} seconds.\e[0m"
